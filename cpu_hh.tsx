@@ -2,13 +2,33 @@ import { useState, useRef } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Tooltip } from 'react-tooltip';
-import InstructionEditor from "./components/InstructionEditor";
 import ExportModal from "./components/ExportModal";
 
 const pipelineStages = ["IF", "ID", "EX", "MEM", "WB"];
 
+// Set some registers and memory to nonzero values for demo
 const defaultRegisters = Array(32).fill(0);
+defaultRegisters[1] = 7;
+defaultRegisters[2] = 5;
+defaultRegisters[3] = 10;
+defaultRegisters[4] = 20;
+defaultRegisters[5] = 2;
+defaultRegisters[6] = 0;
+defaultRegisters[7] = 99;
+defaultRegisters[8] = 42;
+defaultRegisters[9] = 15;
+defaultRegisters[10] = 100;
 const defaultMemory = Array(64).fill(0);
+defaultMemory[0] = 42;
+defaultMemory[1] = 77;
+defaultMemory[2] = 123;
+defaultMemory[3] = 8;
+defaultMemory[4] = 99;
+defaultMemory[5] = 55;
+defaultMemory[8] = 200;
+defaultMemory[10] = 314;
+defaultMemory[12] = 271;
+defaultMemory[20] = 888;
 
 // Types for instructions
 interface RTypeInst { id: number; text: string; type: "R"; rd: number; rs: number; rt: number; }
@@ -23,6 +43,12 @@ const instructionsExampleTyped: Inst[] = [
   { id: 3, text: "BEQ R4, R6, LABEL", type: "B", rs: 4, rt: 6 },
   { id: 4, text: "LW R7, 0(R1)", type: "I", rt: 7, base: 1, offset: 0 },
   { id: 5, text: "SW R7, 4(R1)", type: "I", rt: 7, base: 1, offset: 4 },
+  // Additional instructions for a longer presentation
+  { id: 6, text: "ADD R8, R1, R9", type: "R", rd: 8, rs: 1, rt: 9 },
+  { id: 7, text: "SUB R10, R8, R2", type: "R", rd: 10, rs: 8, rt: 2 },
+  { id: 8, text: "LW R11, 8(R4)", type: "I", rt: 11, base: 4, offset: 8 },
+  { id: 9, text: "SW R11, 12(R4)", type: "I", rt: 11, base: 4, offset: 12 },
+  { id: 10, text: "BEQ R10, R7, LABEL2", type: "B", rs: 10, rt: 7 },
 ];
 
 const getPipelineState = (cycle: number, instructions: any[], forwarding: boolean): string[][] => {
@@ -83,12 +109,8 @@ export default function PipelinedCPUSimulator() {
   const [flushing, setFlushing] = useState(0);
   const [history, setHistory] = useState<any[]>([]); // for step-back
   const [pipelineRegs, setPipelineRegs] = useState<any>({}); // for pipeline register visualization
-  const [editMode, setEditMode] = useState(false);
-  const [editInstructions, setEditInstructions] = useState<Inst[]>([...instructionsExampleTyped]);
-  const [selectedInst, setSelectedInst] = useState<number|null>(null);
   const [instInput, setInstInput] = useState<Inst>({id: 0, text: "", type: "R", rd: 0, rs: 0, rt: 0});
   const inputRef = useRef<HTMLInputElement>(null);
-  const [showForwarding, setShowForwarding] = useState(true);
   const [showHazardDetails, setShowHazardDetails] = useState(true);
   const [execLog, setExecLog] = useState<string[]>([]);
   const [branchStrategy, setBranchStrategy] = useState<string>(branchStrategies[0].value);
@@ -128,30 +150,27 @@ export default function PipelinedCPUSimulator() {
     } else {
       newInst = { id: Date.now(), text: instInput.text, type: "B", rs: (instInput as BTypeInst).rs, rt: (instInput as BTypeInst).rt };
     }
-    setEditInstructions(insts => [...insts, newInst]);
+    setInstructions(insts => [...insts, newInst]);
     setInstInput({id: 0, text: "", type: "R", rd: 0, rs: 0, rt: 0});
     inputRef.current?.focus();
   };
   const handleDeleteInstruction = (id: number) => {
-    setEditInstructions(insts => insts.filter(i => i.id !== id));
+    setInstructions(insts => insts.filter(i => i.id !== id));
   };
   const handleEditInstruction = (id: number) => {
-    const inst = editInstructions.find(i => i.id === id);
+    const inst = instructions.find(i => i.id === id);
     if (inst) {
       if (inst.type === "R") setInstInput({...inst});
       else if (inst.type === "I") setInstInput({...inst});
       else setInstInput({...inst});
-      setSelectedInst(id);
     }
   };
   const handleUpdateInstruction = () => {
-    setEditInstructions(insts => insts.map(i => i.id === selectedInst ? {...instInput, id: selectedInst} as Inst : i));
+    setInstructions(insts => insts.map(i => i.id === instInput.id ? {...instInput} as Inst : i));
     setInstInput({id: 0, text: "", type: "R", rd: 0, rs: 0, rt: 0});
-    setSelectedInst(null);
   };
   const handleApplyInstructions = () => {
-    setInstructions([...editInstructions]);
-    setEditMode(false);
+    setInstructions([...instructions]);
     setCycle(0);
     setRegisters([...defaultRegisters]);
     setMemory([...defaultMemory]);
@@ -176,6 +195,7 @@ export default function PipelinedCPUSimulator() {
 
   // --- Enhanced handleNextCycle ---
   const handleNextCycle = () => {
+    saveHistory();
     const timestamp = new Date().toLocaleTimeString();
     if (flushing > 0) {
       // Find the instruction that caused the flush (last control hazard)
@@ -254,25 +274,43 @@ export default function PipelinedCPUSimulator() {
       }
     }
 
-    // WB stage: show result
+    // WB stage: show result and update state
     const wbStage = pipelineStages.length - 1;
     const wbInsts = getPipelineState(cycle, instructions, forwarding)[wbStage];
     if (wbInsts.length > 0) {
       wbInsts.forEach(instText => {
         const instObj = instructions.find(i => i.text === instText);
         if (instObj) {
-          // Show result after WB
           let result = "";
+          // Copy registers/memory for mutation
+          let newRegisters = [...registers];
+          let newMemory = [...memory];
           if (instObj.type === "R") {
-            result = `R${(instObj as RTypeInst).rd} = ${registers[(instObj as RTypeInst).rs]} op ${registers[(instObj as RTypeInst).rt]}`;
+            // Only support ADD/SUB for demo
+            if (instObj.text.startsWith("ADD")) {
+              newRegisters[instObj.rd] = registers[instObj.rs] + registers[instObj.rt];
+              result = `R${instObj.rd} = R${instObj.rs} + R${instObj.rt} = ${registers[instObj.rs]} + ${registers[instObj.rt]} = ${newRegisters[instObj.rd]}`;
+            } else if (instObj.text.startsWith("SUB")) {
+              newRegisters[instObj.rd] = registers[instObj.rs] - registers[instObj.rt];
+              result = `R${instObj.rd} = R${instObj.rs} - R${instObj.rt} = ${registers[instObj.rs]} - ${registers[instObj.rt]} = ${newRegisters[instObj.rd]}`;
+            }
+            setRegisters(newRegisters);
           } else if (instObj.type === "I" && instObj.text.startsWith("LW")) {
-            result = `R${(instObj as ITypeInst).rt} loaded from M${registers[(instObj as ITypeInst).base] + (instObj as ITypeInst).offset}`;
+            // LW rt, offset(base)
+            const addr = registers[instObj.base] + instObj.offset;
+            newRegisters[instObj.rt] = newMemory[addr] || 0;
+            result = `R${instObj.rt} = M[${addr}] = ${newMemory[addr] || 0}`;
+            setRegisters(newRegisters);
           } else if (instObj.type === "I" && instObj.text.startsWith("SW")) {
-            result = `M${registers[(instObj as ITypeInst).base] + (instObj as ITypeInst).offset} = R${(instObj as ITypeInst).rt}`;
+            // SW rt, offset(base)
+            const addr = registers[instObj.base] + instObj.offset;
+            newMemory[addr] = registers[instObj.rt];
+            result = `M[${addr}] = R${instObj.rt} = ${registers[instObj.rt]}`;
+            setMemory(newMemory);
           } else if (instObj.type === "B") {
             result = `Branch evaluated: ${isBranchTaken(instObj, registers)}`;
           }
-          setWbResults(r => [...r, {cycle, inst: instObj.text, result, registers: [...registers], memory: [...memory]}]);
+          setWbResults(r => [...r, {cycle, inst: instObj.text, result, registers: [...newRegisters], memory: [...newMemory]}]);
         }
       });
     }
@@ -343,15 +381,100 @@ export default function PipelinedCPUSimulator() {
 
   return (
     <div className="p-4 space-y-4 w-full max-w-6xl mx-auto min-h-screen flex flex-col">
-      <h1 className="text-xl font-bold">5-Stage Pipelined CPU Simulator</h1>
+      {/* --- Enhanced Animated Pipeline Visualization (TOP) --- */}
+      <div className="mb-4">
+        <div className="bg-white rounded-xl shadow p-4 overflow-x-auto">
+          <h2 className="text-lg font-semibold mb-2">Animated Pipeline Visualization</h2>
+          <div className="relative">
+            {/* Stage grid lines and lane backgrounds */}
+            <div className="absolute inset-0 flex z-0 pointer-events-none">
+              {pipelineStages.map((stage, idx) => (
+                <div key={stage} className="border-r border-gray-300 h-full" style={{ width: '9rem', background: idx % 2 === 0 ? '#f8fafc' : '#e0e7ef', opacity: 0.3 }}></div>
+              ))}
+            </div>
+            {/* Stage headers - now spaced in a grid like Pipeline Stages card */}
+            <div className="grid grid-cols-5 gap-4 z-10 relative">
+              {pipelineStages.map(stage => (
+                <div key={stage} className="w-36 text-center font-bold text-blue-700 pb-2 border-b-2 border-blue-200 mx-auto">{stage}</div>
+              ))}
+            </div>
+            {/* Instruction rows */}
+            <div className="grid grid-cols-5 gap-4 mt-2 z-10 relative">
+              {instructions.map((inst, instIdx) => {
+                const stageIndex = cycle - instIdx;
+                if (stageIndex < 0 || stageIndex >= pipelineStages.length) {
+                  // Do not render anything if instruction is not in the pipeline
+                  return null;
+                }
+                const hazardType = getHazardType(stageIndex, 0);
+                return (
+                  <div
+                    key={inst.id}
+                    className="h-12 flex items-center relative group"
+                    style={{ height: 48, gridColumnStart: stageIndex + 1 }}
+                  >
+                    <div
+                      className={`w-36 h-10 flex items-center justify-center rounded-lg shadow-lg font-semibold text-xs border-2 animate-move ${hazardColors[hazardType]} transition-all duration-500 cursor-pointer group-hover:scale-105 group-hover:ring-2 group-hover:ring-blue-400/40`}
+                      data-tooltip-id={`bubble-tip-${inst.id}`}
+                      tabIndex={0}
+                      aria-label={`Instruction ${inst.text} in stage ${pipelineStages[stageIndex]}`}
+                    >
+                      <span className="truncate max-w-[6.5rem]">{inst.text}</span>
+                      {/* Hazard icons with animation */}
+                      {hazardType === 'RAW' && <span title="RAW Hazard" className="ml-2 animate-pulse text-yellow-600">⚠️</span>}
+                      {hazardType === 'CONTROL' && <span title="Control Hazard" className="ml-2 animate-bounce text-red-600">⏸️</span>}
+                      {hazardType === 'STRUCTURAL' && <span title="Structural Hazard" className="ml-2 animate-pulse text-blue-600">🏗️</span>}
+                      <Tooltip id={`bubble-tip-${inst.id}`} place="top" className="!z-[9999] !rounded-lg !shadow-xl !bg-white !text-gray-900 !border !border-blue-200">
+                        <div className="font-semibold text-blue-700 mb-1">{pipelineStages[stageIndex]} Stage</div>
+                        <div><b>Instruction:</b> <span className="text-gray-800">{inst.text}</span></div>
+                        <div><b>Hazard:</b> <span className="text-gray-800">{hazardType === 'NONE' ? 'None' : hazardType}</span></div>
+                      </Tooltip>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <style>{`
+            @keyframes move {
+              0% { opacity: 0.7; transform: scale(0.95); }
+              100% { opacity: 1; transform: scale(1); }
+            }
+            .animate-move {
+              animation: move 0.7s cubic-bezier(0.4,0,0.2,1);
+            }
+            .animate-pulse {
+              animation: pulse 1.2s infinite;
+            }
+            @keyframes pulse {
+              0%, 100% { opacity: 1; }
+              50% { opacity: 0.5; }
+            }
+            .animate-bounce {
+              animation: bounce 1.1s infinite;
+            }
+            @keyframes bounce {
+              0%, 100% { transform: translateY(0); }
+              50% { transform: translateY(-6px); }
+            }
+          `}</style>
+        </div>
+      </div>
+      {/* --- End Enhanced Animated Pipeline Visualization --- */}
       <div className="space-y-2">
         <Card>
           <CardContent className="p-4">
             <h2 className="text-lg font-semibold">Pipeline Stages (Cycle {cycle})</h2>
+            {/* Stage headers - grid layout for clarity */}
+            <div className="grid grid-cols-5 gap-4 mb-2">
+              {pipelineStages.map(stage => (
+                <div key={stage} className="w-36 text-center font-bold text-blue-700 pb-2 border-b-2 border-blue-200 mx-auto">{stage}</div>
+              ))}
+            </div>
             <div className="grid grid-cols-5 gap-4 mt-2">
               {pipelineStages.map((stage, i) => (
                 <div key={stage} className="p-2 rounded-xl border-2 mb-2" style={{minHeight: 80, borderColor: '#e5e7eb'}}>
-                  <div className="font-bold mb-1">{stage}</div>
+                  {/* <div className="font-bold mb-1">{stage}</div> */}
                   <div className="text-xs space-y-1">
                     {pipelineState[i].length > 0 ? pipelineState[i].map((instText, idx2) => {
                       const hazard = getHazardType(i, idx2);
@@ -370,6 +493,49 @@ export default function PipelinedCPUSimulator() {
             </div>
           </CardContent>
         </Card>
+        {/* --- Controls: moved below Pipeline Stages card --- */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          <Button onClick={handleNextCycle}>Next Cycle</Button>
+          <Button onClick={handleStepBack}>Step Back</Button>
+          <Button onClick={() => setShowHazardDetails(h => !h)}>
+            {showHazardDetails ? "Hide Hazard Details" : "Show Hazard Details"}
+          </Button>
+          <Button onClick={() => setForwarding(!forwarding)}>
+            Toggle Forwarding: {forwarding ? "ON" : "OFF"}
+          </Button>
+          <Button onClick={() => setPredictionEnabled(!predictionEnabled)}>
+            Toggle Prediction: {predictionEnabled ? "ON" : "OFF"}
+          </Button>
+          <select className="border p-1" value={branchStrategy} onChange={e => setBranchStrategy(e.target.value)}>
+            {branchStrategies.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          <Button onClick={() => {
+            setCycle(0);
+            setRegisters([...defaultRegisters]);
+            setMemory([...defaultMemory]);
+            setInstructions([...instructionsExampleTyped]);
+            setForwarding(true);
+            setExplanations([]);
+            setStalls(0);
+            setBranchHistory({});
+            setPredictionEnabled(true);
+            setFlushing(0);
+            setHistory([]);
+            setExecLog([]);
+            setWbResults([]);
+            setSaturatingTable({});
+          }}>
+            Reset Simulation
+          </Button>
+          <Button onClick={handleExport}>Export JSON</Button>
+        </div>
+        {/* --- Modals: now immediately after controls --- */}
+        {exportData && (
+          <ExportModal exportData={exportData} onClose={() => setExportData("")} />
+        )}
+        {/* --- End Controls/Modals --- */}
         <Card>
           <CardContent className="p-4">
             <h2 className="text-lg font-semibold">Registers</h2>
@@ -403,72 +569,6 @@ export default function PipelinedCPUSimulator() {
           </CardContent>
         </Card>
       </div>
-      <div className="flex flex-wrap gap-2 mb-4">
-        <Button onClick={handleNextCycle}>Next Cycle</Button>
-        <Button onClick={handleStepBack}>Step Back</Button>
-        <Button onClick={() => setShowForwarding(f => !f)}>
-          {showForwarding ? "Hide Forwarding" : "Show Forwarding"}
-        </Button>
-        <Button onClick={() => setShowHazardDetails(h => !h)}>
-          {showHazardDetails ? "Hide Hazard Details" : "Show Hazard Details"}
-        </Button>
-        <Button onClick={() => setForwarding(!forwarding)}>
-          Toggle Forwarding: {forwarding ? "ON" : "OFF"}
-        </Button>
-        <Button onClick={() => setPredictionEnabled(!predictionEnabled)}>
-          Toggle Prediction: {predictionEnabled ? "ON" : "OFF"}
-        </Button>
-        <select className="border p-1" value={branchStrategy} onChange={e => setBranchStrategy(e.target.value)}>
-          {branchStrategies.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
-        <Button onClick={() => {
-          setCycle(0);
-          setRegisters([...defaultRegisters]);
-          setMemory([...defaultMemory]);
-          setInstructions([...instructionsExampleTyped]);
-          setForwarding(true);
-          setExplanations([]);
-          setStalls(0);
-          setBranchHistory({});
-          setPredictionEnabled(true);
-          setFlushing(0);
-          setHistory([]);
-          setExecLog([]);
-          setWbResults([]);
-          setSaturatingTable({});
-        }}>
-          Reset Simulation
-        </Button>
-        <Button onClick={handleExport}>Export JSON</Button>
-        <Button onClick={() => setEditMode(m => !m)}>
-          {editMode ? "Close Editor" : "Edit Instructions"}
-        </Button>
-      </div>
-      {/* Instruction Editor Modal */}
-      {editMode && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50" role="dialog" aria-modal="true">
-          <InstructionEditor
-            editInstructions={editInstructions}
-            setEditInstructions={setEditInstructions}
-            instInput={instInput}
-            setInstInput={setInstInput}
-            selectedInst={selectedInst}
-            setSelectedInst={setSelectedInst}
-            handleAddInstruction={handleAddInstruction}
-            handleEditInstruction={handleEditInstruction}
-            handleDeleteInstruction={handleDeleteInstruction}
-            handleUpdateInstruction={handleUpdateInstruction}
-            handleApplyInstructions={handleApplyInstructions}
-            getDefaultInstInput={getDefaultInstInput}
-          />
-        </div>
-      )}
-      {/* Export JSON Modal */}
-      {exportData && (
-        <ExportModal exportData={exportData} onClose={() => setExportData("")} />
-      )}
       {showHazardDetails && (
         <Card>
           <CardContent className="p-4">
